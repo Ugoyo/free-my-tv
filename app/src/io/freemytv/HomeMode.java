@@ -75,7 +75,6 @@ final class HomeMode {
         "com.google.android.play.games", "com.google.android.youtube.tvmusic",        // Play Games, YouTube Music
         // TCL
         "com.tcl.magiconnectfree", "com.tcl.miracast",                                // screen mirroring apps
-        "com.tcl.waterfall.overseas", "com.tcl.channelplus",                          // TCL Channel and its Live TV
         "com.tcl.messagebox", "com.tcl.usercenter",                                   // TCL messages and account
         "com.tcl.exhibit", "com.tcl.esticker", "com.tcl.hotelmenu",                   // store demo, hotel menu
         "com.tcl.repairguide", "com.tcl.ocean.instructions", "com.tcl.logkit",        // repair guide, manual, logs
@@ -115,6 +114,10 @@ final class HomeMode {
         "com.tcl.settings", "com.tcl.common.shortcutmenu", "com.tcl.inputmethod.international", "com.tcl.android.webview",
         "com.tcl.wifi.resources.overlay", "com.tcl.partnercustomizer", "com.tcl.tv.tclhome_passive",
         "com.tcl.keycustomfunctionservice",                                           // remote keys; a fallback home too
+        // Hotack X1BR projector (LuminaOS, Android 14): its home, settings, Wi-Fi, Bluetooth and keystone in one (#342)
+        "com.htc.luminaos",
+        "com.tcl.channelplus",                                                        // the channel source TCL's Live TV tunes (off: black screen)
+        "com.tcl.waterfall.overseas",                                                 // TCL Channel: partnercustomizer's entry and key open it
         "com.google.android.gms", "com.google.android.gsf", "com.android.vending", "com.google.android.apps.mediashell",
         "com.google.android.tv.remote.service", "com.google.android.inputmethod.latin", "com.google.android.webview",
         "com.android.tv.settings", "com.android.systemui", "android", PKG,
@@ -143,6 +146,7 @@ final class HomeMode {
         "com.smartdevice.livetv", "com.smartdevice.livetv.overlay_SANLUX", "com.smartdevice.bleconnectservice",
         "com.smartdevice.duplebluetooth", "com.smartdevice.myapp", "com.smartdevice.setupwraith",
         "com.smartdevice.aftersale", "com.smartdevice.factory", "com.smartdevice.dailymanage",
+        "com.smartdevice.global.service", "com.smartdevice.dailyshortcut", "com.smartdevice.service", // remote, quick settings, system
         "com.smartdevice.dtv.icast", "com.smartdevice.leanbacklauncher.customizer", "com.mediatek.OledFuctionService",
         "com.mediatek.android.boot.appsplashscreen", "com.mediatek.android.leanbacklauncher.partnercustomizer",
         // KTC (NextStar; MediaTek): live TV and tuners, setup, settings, updates, casting, remote pairing, factory menus
@@ -192,8 +196,22 @@ final class HomeMode {
     /** Factory and service menus, on any brand ("com.tcl.factory.view", "com.cvte.tv.fac.aging", "mediatek.factorymenu.ui"). */
     private static final Pattern FACTORY = Pattern.compile("(.*\\.)?(factory|factorymenu|facmenu|fac|hkcfac|testpq)(\\..*)?");
 
+    /** A factory or service menu: never turned off, and never listed with the TV's own apps (HomeApps.launchable). */
+    static boolean factoryMenu(String pkg) {
+        return FACTORY.matcher(pkg).matches();
+    }
+
+    /** Amazon's streaming apps, not part of the system on any TV: Recent Apps may close them (mayTurnOff still refuses them). */
+    private static final Set<String> AMAZON_APPS = new HashSet<>(Arrays.asList(
+            "com.amazon.amazonvideo.livingroom", "com.amazon.music.tv"));
+
+    /** Recent Apps' ▲: what may be turned off, and Amazon's streaming apps, which only stop. */
+    static boolean mayStop(String pkg) {
+        return mayTurnOff(pkg) || AMAZON_APPS.contains(pkg) && !PROTECTED.contains(pkg);
+    }
+
     /** Checked before every disable: never the protected list, Amazon's packages, Android's own pieces or a factory menu. */
-    private static boolean mayTurnOff(String pkg) {
+    static boolean mayTurnOff(String pkg) {
         return !PROTECTED.contains(pkg) && !pkg.startsWith("com.amazon.")
                 && !CORE.matcher(pkg).matches() && !FACTORY.matcher(pkg).matches();
     }
@@ -204,7 +222,7 @@ final class HomeMode {
      * the receiver of the remote's Input key and Bluetooth pairing (fusion.android.tv.demo on several MediaTek boards).
      * null when the check didn't finish: then none of them goes off this time.
      */
-    private static Set<String> neededByTv(Adb adb, Set<String> pkgs) throws IOException {
+    static Set<String> neededByTv(Adb adb, Set<String> pkgs) throws IOException {
         Set<String> keep = new HashSet<>();
         if (pkgs.isEmpty()) return keep;
         // Only the package's own requested permissions: a shared user's would match by mistake. A line per package keeps
@@ -229,9 +247,11 @@ final class HomeMode {
 
     // MARK: - Requests (from any process)
 
-    /** Asks the main process to switch (the settings screen calls this). */
-    static void request(Context c, String mode) {
-        ModeJob.schedule(c, ModeJob.APPLY, mode, 0);
+    /** Asks the main process to switch (the settings screen calls this); the stamp tells when it started (ModeJob.started). */
+    static long request(Context c, String mode) {
+        // Back to Free My TV before Original's revoke ran: it would stop the app mid-switch, and isn't wanted any more.
+        if (FREE.equals(mode)) ModeJob.cancel(c, ModeJob.REVOKE_WATCH);
+        return ModeJob.schedule(c, ModeJob.APPLY, mode, 0);
     }
 
     /** Our home screen crashed 3 times in 5 minutes: give the home screen back to the TV's own (asked by :home). */
@@ -253,9 +273,10 @@ final class HomeMode {
 
     /**
      * The remote's app buttons (RemoteKeys) need an accessibility service that only filters those keys. It is on only
-     * on TCL, Vestel, KTC, Sony, Xiaomi and Hisense TVs (and Formovie projectors) in Free My TV mode, and goes off with Original. Android turns it off when this app is updated, so the
-     * boot check and an update turn it back on. A change in Remote Buttons asks again: with every button on Nothing,
-     * and on TCL's Android 11, it goes off (RemoteKeys.serviceWanted).
+     * on TCL, Vestel, KTC, Sony, Xiaomi and Hisense TVs and the JVC G24 (and Formovie projectors and the Google TV
+     * Streamer) in Free My TV mode, and goes off with Original. Android turns it off when this app is updated, so the
+     * boot check and an update turn it back on. A change in Remote Buttons asks again: with every button on Nothing
+     * (or the brand's default), and on TCL's Android 11, it goes off (RemoteKeys.serviceWanted).
      */
     static void ensureRemoteService(Context c, long delayMs) {
         if (RemoteKeys.supported()) ModeJob.schedule(c, ModeJob.REMOTE, null, delayMs);
@@ -427,7 +448,11 @@ final class HomeMode {
             // Off now and not on our list: the person turned it off, unless an earlier install of Free My TV did (its
             // list lives in the TV's settings too, since an uninstall erases our state file).
             Set<String> ours = recorded(adb);
-            for (String pkg : packages(adb, "-d")) {
+            Set<String> offNow = packages(adb, "-d");
+            // A reinstall starts from a fresh state: only the TV's record knows what an older version turned off that's
+            // no longer on the list. One that won't turn on stays recorded, so Original tries again.
+            disabled.addAll(offTheList(adb, ours, offNow, packageOf(home)));
+            for (String pkg : offNow) {
                 if (targets(home, dream, true).contains(pkg) && !disabled.contains(pkg) && !ours.contains(pkg)) keptOff.add(pkg);
             }
             keptOff.removeAll(ours);
@@ -477,6 +502,7 @@ final class HomeMode {
                     AppLog.w("remote buttons service: " + e.getMessage());
                 }
             }
+            wakeWatch(adb, true);
             notice(c, Ui.trf("Free My TV is on: new home screen and screensaver, {n} apps turned off.", "n", disabled.size()));
             busy(c, Ui.tr("Measuring Free My TV…"));
             measure(c, adb, FREE, false);
@@ -532,6 +558,7 @@ final class HomeMode {
             } catch (IOException e) {
                 AppLog.w("remote buttons service: " + e.getMessage());
             }
+            wakeWatch(adb, false);
             SleepTimer.stop(c);
             adb.shell("appops set " + PKG + " SYSTEM_ALERT_WINDOW default");   // SleepOverlay's, if it was allowed
             Capabilities.forget(c, Capabilities.OVERLAY);                       // asked again next time
@@ -556,6 +583,7 @@ final class HomeMode {
             done(c, null);
             homeAfter(adb);
             ModeJob.schedule(c, ModeJob.MEMORY, ORIGINAL, 120_000);
+            if (WatchNext.allowed(c)) ModeJob.schedule(c, ModeJob.REVOKE_WATCH, null, 5_000);
         } catch (Exception e) {
             done(c, Ui.trf("Couldn't go back to the original: {error}", "error", e.getMessage()));
         }
@@ -641,6 +669,7 @@ final class HomeMode {
                 record(adb, stillOff);
                 // The screensaver first: if that fails, the revert isn't marked done and the next try does it again.
                 restoreScreensaver(adb, s);
+                wakeWatch(adb, false);
                 SleepTimer.stop(app);   // its row shows Unavailable from now on
                 try {
                     nowPlaying(app, adb, false);   // and so does Now Playing's
@@ -705,6 +734,11 @@ final class HomeMode {
                 }
                 for (String pkg : sorted(wanted)) if (!order.contains(pkg)) order.add(pkg);
                 Set<String> disabled = new HashSet<>(stringList(s, "disabled"));
+                Set<String> gone = new HashSet<>(disabled);
+                offTheList(adb, disabled, disabledNow, homePkg);
+                gone.removeAll(disabled);
+                wanted.removeAll(gone);
+                order.removeAll(gone);
                 // screensaver=false after a switch with ours: the TV's own screensaver app comes back on.
                 String dreamPkg = packageOf(dream);
                 if (!Config.SCREENSAVER && dreamPkg != null && disabled.remove(dreamPkg)) {
@@ -777,6 +811,7 @@ final class HomeMode {
                     adb.shell("cmd package set-home-activity " + HOME_ACTIVITY);
                     fixed.add(Ui.tr("the home screen"));
                 }
+                wakeWatch(adb, !reverted);   // again after a restart, which ends it (running already: left alone)
                 // Whole component names: ".ScreensaverAlone" (Android 11 to 12L) contains ".Screensaver" (the others).
                 List<String> savers = Arrays.asList(adb.shell("settings get secure screensaver_components").trim().split(","));
                 if (Config.SCREENSAVER && !reverted && !savers.contains(DREAM)) {
@@ -863,6 +898,88 @@ final class HomeMode {
         if (!pkg.matches("[\\w.]*")) pkg = "";
         adb.shell("setprop " + JM_HOME + " '" + pkg + "'");
         return pkg.equals(jmHome(adb));
+    }
+
+    // MARK: - Hikeen boards: back from standby (#367)
+
+    /**
+     * Realtek TVs on Hikeen boards (Romsat, KIVI; Android 9) force-stop the app in front as they go to standby, from a
+     * hook in ActivityManager (its `mLastPackageName`): that finishes our home screen, and the TV wakes on Realtek's
+     * black FallbackHome until Home is pressed. The force-stop also cancels the app's jobs and alarms, so nothing in the
+     * app can answer. This loop runs in adb's shell instead (uid 2000: the hook and com.hikeen.cleanmaster leave it
+     * alone): at each "Unblocked screen on" in the system log it looks for FallbackHome in front for 3 seconds, and only
+     * then opens the default home screen, so an input or an app the TV wakes into stays. The switch and the boot check
+     * start it (a restart ends it); Original and the watchdog's revert stop it. Its name is in its command lines, so
+     * pgrep and pkill find only it: the board runs a root logcat of its own, which pkill may not touch.
+     */
+    private static final String WAKE = "freemytv-wake";
+    /** Matches WAKE but not the command line that asks for it ("[e]" isn't "e"). */
+    private static final String WAKE_MATCH = "'freemytv-wak[e]'";
+    private static final String WAKE_LOOP = "trap \"\" HUP; logcat -b system -T 1 -s DisplayPowerController:I " + WAKE + ":S"
+            + " | while read -r line; do case \"$line\" in *\"Unblocked screen on\"*) for i in 1 2 3; do sleep 1;"
+            + " if dumpsys activity activities | grep ResumedActivity | grep -q FallbackHome; then"
+            + " am start -a android.intent.action.MAIN -c android.intent.category.HOME; break; fi; done;; esac; done";
+
+    /** Starts the loop on a Hikeen board, once, or stops it. Only logs: what called it goes on either way. */
+    private static void wakeWatch(Adb adb, boolean on) {
+        try {
+            if (!on) {
+                if (!wakeRunning(adb)) return;
+                adb.shell("pkill -f " + WAKE_MATCH);
+                AppLog.w("wake watch off");
+                return;
+            }
+            if (!adb.shell("pm list packages com.hikeen.").contains("package:com.hikeen.") || wakeRunning(adb)) return;
+            // HUP ignored from the start: when this shell ends, the kernel sends one to what it started, and the loop
+            // isn't in a session of its own until setsid runs.
+            adb.shell("trap \"\" HUP; setsid sh -c '" + WAKE_LOOP + "' " + WAKE + " </dev/null >/dev/null 2>&1 &");
+            AppLog.w(wakeRunning(adb) ? "wake watch on: the home screen comes back after standby (#367)" : "wake watch didn't start");
+        } catch (IOException e) {
+            AppLog.w("wake watch: " + e.getMessage());
+        }
+    }
+
+    /** Only process numbers count: a TV without pgrep answers with an error. */
+    private static boolean wakeRunning(Adb adb) throws IOException {
+        return adb.shell("pgrep -f " + WAKE_MATCH).trim().matches("\\d+(\\s+\\d+)*");
+    }
+
+    // MARK: - Continue Watching's permission
+
+    /**
+     * Continue Watching reads Android TV's Watch Next list, which needs READ_TV_LISTINGS. It is granted only when you
+     * pick Continue Watching (Home Settings asks this from :home), through the TV's own ADB so the TV doesn't ask;
+     * if that fails, Home Settings falls back to Android's own permission dialog.
+     */
+    static void requestWatchGrant(Context c) {
+        ModeJob.schedule(c, ModeJob.GRANT_WATCH, null, 0);
+    }
+
+    static void grantWatchNow(Context app) {
+        if (WatchNext.allowed(app)) return;
+        try (Adb adb = Adb.connect(app, 8_000, null)) {
+            adb.shell("pm grant " + PKG + " " + WatchNext.PERMISSION);
+            AppLog.w("continue watching permission " + (WatchNext.allowed(app) ? "granted" : "not granted"));
+        } catch (IOException e) {
+            AppLog.w("continue watching permission: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Original takes the permission back. Android stops the app's processes when a permission is revoked, so this runs
+     * as its own job once the switch is over (if the job is run again after that, it finds nothing left to revoke). It
+     * holds the switch lock, so a switch never runs under it, and does nothing if Free My TV is back by then.
+     */
+    static void revokeWatchNow(Context app) {
+        synchronized (RUN) {
+            if (!WatchNext.allowed(app) || !ORIGINAL.equals(state(app).optString("mode", ORIGINAL))) return;
+            try (Adb adb = Adb.connect(app, 10_000, null)) {
+                AppLog.w("continue watching permission: revoking");
+                adb.shell("pm revoke " + PKG + " " + WatchNext.PERMISSION);
+            } catch (IOException e) {
+                AppLog.w("continue watching permission: " + e.getMessage());
+            }
+        }
     }
 
     /** Whether Google TV's setup app is one of the home screens (its RecoveryActivity), so it must go off too. */
@@ -1141,6 +1258,33 @@ final class HomeMode {
             AppLog.w("could not read the record of what we turned off: " + e.getMessage());
         }
         return out;
+    }
+
+    /**
+     * Turned off by an earlier version and protected now (TCL's Live TV source and TCL Channel): back on, and out of
+     * {@code record} (with {@code offNow}). Only those: one that is merely not a target this time (the old home screen
+     * after a reinstall that recorded another) stays as it is, since turned on here it could take the Home button.
+     * Never Google TV's setup app or the TV's home screen here. Returns the ones still off that wouldn't turn on; they
+     * stay in {@code record}.
+     */
+    private static Set<String> offTheList(Adb adb, Set<String> record, Set<String> offNow, String homePkg)
+            throws IOException {
+        Set<String> stuck = new HashSet<>();
+        for (String pkg : sorted(record)) {
+            if (pkg.equals(GOOGLE_SETUP) || pkg.equals(homePkg) || mayTurnOff(pkg)) continue;
+            if (!offNow.contains(pkg)) {
+                AppLog.w("dropped " + pkg + " from the record: no longer on the list");
+            } else if (adb.shell("pm enable " + pkg).contains("new state: enabled")) {
+                offNow.remove(pkg);
+                AppLog.w("turned back on " + pkg + ": no longer on the list");
+            } else {
+                AppLog.w("could not turn back on " + pkg);
+                stuck.add(pkg);
+                continue;
+            }
+            record.remove(pkg);
+        }
+        return stuck;
     }
 
     private static void record(Adb adb, Set<String> disabled) {

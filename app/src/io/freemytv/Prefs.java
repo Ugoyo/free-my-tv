@@ -11,8 +11,10 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Settings changed on the TV itself (Free My TV > Settings). config.properties only gives the first
@@ -50,15 +52,30 @@ final class Prefs {
      */
     static final int KEY_HISENSE_PRIME = 295, KEY_HISENSE_YOUTUBE = KeyEvent.KEYCODE_BUTTON_3, KEY_HISENSE_DISNEY = 607,
             KEY_HISENSE_APPS = 284, KEY_HISENSE_SETTINGS = KeyEvent.KEYCODE_NOTIFICATION, KEY_HISENSE_PROFILE = 288;
+    /** Google TV Streamer's Vendor_18d1_Product_9451.kl; MACRO_1 (313) was added in API 34. */
+    static final int KEY_GOOGLE_YOUTUBE = KeyEvent.KEYCODE_BUTTON_3, KEY_GOOGLE_NETFLIX = KeyEvent.KEYCODE_BUTTON_4,
+            KEY_GOOGLE_CUSTOM = 313;
     /** A button's value that opens this home screen's All Apps. */
     static final String ALL_APPS = HomeMode.PKG + "#all";
-    static final int[] KEYS = RemoteKeys.HISENSE ? new int[] {KEY_HISENSE_PRIME, KEY_HISENSE_YOUTUBE, KEY_HISENSE_DISNEY,
+    /**
+     * The JVC G24's (Skyworth) Inputs button, one key here whichever way it comes (BUTTON_16 with scan code 383 or 79,
+     * or BUTTON_14 with 240: SkyworthRemote.shortcut), and its gear, NOTIFICATION; TV_SHORTCUTS and QUICK_SETTINGS
+     * are the values that open the TV's input list and our Quick Settings panel.
+     */
+    static final int KEY_JVC_SHORTCUT = 200_383, KEY_JVC_SETTINGS = KeyEvent.KEYCODE_NOTIFICATION;
+    static final String TV_SHORTCUTS = HomeMode.PKG + "#tvshortcuts";
+    static final String QUICK_SETTINGS = HomeMode.PKG + "#quicksettings";
+    static final int[] KEYS = RemoteKeys.GOOGLE_STREAMER
+            ? new int[] {KEY_GOOGLE_YOUTUBE, KEY_GOOGLE_NETFLIX, KEY_GOOGLE_CUSTOM}
+            : RemoteKeys.JVC_SKYWORTH ? new int[] {KEY_JVC_SHORTCUT, KEY_JVC_SETTINGS}
+            : RemoteKeys.HISENSE ? new int[] {KEY_HISENSE_PRIME, KEY_HISENSE_YOUTUBE, KEY_HISENSE_DISNEY,
                     KEY_HISENSE_APPS, KEY_HISENSE_SETTINGS, KEY_HISENSE_PROFILE}
             : RemoteKeys.SONY
             ? new int[] {KEY_SONY_CORE, KEY_SONY_NETFLIX, KEY_SONY_DISNEY, KEY_SONY_PRIME, KEY_SONY_YOUTUBE, KEY_SONY_CRUNCHYROLL,
                     KEY_SONY_PLAY}
             : RemoteKeys.STEM_NETFLIX ? new int[] {KEY_STEM_NETFLIX}
             : RemoteKeys.KTC ? new int[] {KEY_KTC_TABII}
+            : RemoteKeys.XIAOMI_PATCHWALL_ONLY ? new int[] {KEY_XIAOMI_PATCHWALL}
             : RemoteKeys.XIAOMI ? new int[] {KEY_MI, KEY_YOUTUBE, KEY_XIAOMI_PATCHWALL, KEY_XIAOMI_OKKO, KEY_XIAOMI_VK,
                     KEY_XIAOMI_RUTUBE, KEY_XIAOMI_KION, KEY_XIAOMI_WINK, KEY_XIAOMI_IVI}
             : new int[] {KEY_NETFLIX, KEY_YOUTUBE, KEY_PRIME, KEY_TCL_CHANNEL};
@@ -78,6 +95,14 @@ final class Prefs {
     static boolean clock24() {
         return app != null && android.text.format.DateFormat.is24HourFormat(app);
     }
+
+    /** "auto" (the TV's own 12/24-hour setting), "24" or "12". */
+    static String clockFormat() {
+        String v = sp().getString("clock", "auto");
+        return v.equals("24") || v.equals("12") ? v : "auto";
+    }
+
+    static void setClockFormat(String v) { put("clock", v); }
 
     /** The app's context in this process (null before App.onCreate). */
     static Context context() {
@@ -113,6 +138,14 @@ final class Prefs {
     private static void put(String key, boolean value) {
         sp().edit().putBoolean(key, value).apply();
         version++;
+    }
+
+    /**
+     * Without bumping `version`: a new version makes the home screen start over (and fetch the weather and prices
+     * again). Continue Watching's lists don't need that: the home screen reads them on every return (reload).
+     */
+    private static void putQuietly(String key, Set<String> value) {
+        sp().edit().putStringSet(key, new HashSet<>(value)).apply();
     }
 
     // MARK: - Language and units
@@ -182,6 +215,10 @@ final class Prefs {
 
     static void setTheme(String v) { put("theme", v); }
 
+    /** Wi-Fi/Ethernet, Bluetooth and USB icons at the top-left of the home screen. */
+    static boolean statusIcons() { return sp().getBoolean("statusicons", false); }
+    static void setStatusIcons(boolean on) { put("statusicons", on); }
+
     // MARK: - City
 
     static String city() { return sp().getString("city", Place.city()).trim(); }
@@ -200,6 +237,36 @@ final class Prefs {
     /** OK on the screensaver opens the title it shows, in its app; any other key only closes it. Off: any key closes it. */
     static boolean saverWatch() { return sp().getBoolean("saverWatch", false); }
     static void setSaverWatch(boolean on) { put("saverWatch", on); }
+
+    // MARK: - Top of the home screen
+
+    static final String TOP_PICKS = "picks", TOP_CONTINUE = "continue", TOP_NONE = "none";
+    static final String[] TOP_CONTENT = {TOP_PICKS, TOP_CONTINUE, TOP_NONE};
+
+    /** What the cards under the title show: the recommendations (TMDB), what you were watching in your apps, or nothing. */
+    static String topContent() {
+        String v = sp().getString("topContent", TOP_PICKS);
+        return v.equals(TOP_CONTINUE) || v.equals(TOP_NONE) ? v : TOP_PICKS;
+    }
+
+    static void setTopContent(String v) { put("topContent", v); }
+
+    /** Apps left out of Continue Watching (Settings), by package. */
+    static Set<String> watchOff() { return new HashSet<>(sp().getStringSet("watchOff", new HashSet<>())); }
+    static void setWatchOff(Set<String> packages) { putQuietly("watchOff", packages); }
+
+    /** Single items hidden from Continue Watching (holding OK on a card), as WatchNext.hideKey. */
+    static Set<String> watchHidden() { return new HashSet<>(sp().getStringSet("watchHidden", new HashSet<>())); }
+    static void setWatchHidden(Set<String> keys) { putQuietly("watchHidden", keys); }
+
+    /** Recent Apps: "off" (the default: Android manages memory on its own), "drawer" (a shortcut in the bottom drawer and the
+     *  remote's app-switch key) or "home" (those, and pressing Home twice). The top button is its own choice (Top Buttons). */
+    static String recents() {
+        String v = sp().getString("recents", "off");
+        return v.equals("drawer") || v.equals("home") ? v : "off";
+    }
+
+    static void setRecents(String v) { put("recents", v); }
 
     // MARK: - Widgets and coins
 
@@ -222,8 +289,28 @@ final class Prefs {
     static boolean photos() { return sp().getBoolean("photos", true); }
     static void setPhotos(boolean on) { put("photos", on); }
 
+    /**
+     * With an Immich server, where My Photos come from: "default" (none of yours: the picks' photos, as without
+     * Immich), "immich" (all its photos) or "album" (photoAlbum, its id; photoAlbumName to show).
+     */
+    static String photoSource() { return sp().getString("photoSource", "immich"); }
+    static String photoAlbum() { return sp().getString("photoAlbum", ""); }
+    static String photoAlbumName() { return sp().getString("photoAlbumName", ""); }
+
+    static void setPhotoSource(String source, String album, String name) {
+        sp().edit().putString("photoSource", source).putString("photoAlbum", album).putString("photoAlbumName", name).apply();
+        version++;
+    }
+
     static boolean coin(int i) { return sp().getBoolean("coin" + i, true); }
     static void setCoin(int i, boolean on) { put("coin" + i, on); }
+
+    /**
+     * Also list the TV's own system apps (Settings, Files, the manufacturer's apps) in All Apps and the shelf editor.
+     * Off keeps the list as it always was: the apps people installed, plus the system ones a TV needs there.
+     */
+    static boolean androidApps() { return sp().getBoolean("androidapps", false); }
+    static void setAndroidApps(boolean on) { put("androidapps", on); }
 
     // MARK: - TMDB key
 
@@ -301,6 +388,13 @@ final class Prefs {
     // MARK: - Remote buttons
 
     private static String defaultApp(int keyCode) {
+        if (RemoteKeys.GOOGLE_STREAMER) {
+            return keyCode == KEY_GOOGLE_YOUTUBE ? "com.google.android.youtube.tv" : "";
+        }
+        if (RemoteKeys.JVC_SKYWORTH) {
+            if (keyCode == KEY_JVC_SHORTCUT) return TV_SHORTCUTS;
+            return keyCode == KEY_JVC_SETTINGS ? QUICK_SETTINGS : "";
+        }
         if (RemoteKeys.HISENSE) {
             switch (keyCode) {
                 case KEY_HISENSE_PRIME: return "com.amazon.amazonvideo.livingroom";
