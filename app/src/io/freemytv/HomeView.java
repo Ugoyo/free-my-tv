@@ -1591,7 +1591,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     /** "Last opened first": the app just left comes first, focused, before the screen shows (no file or package reads). */
     private void reorderRecent() {
         int v = Recent.version;
-        if (v == recentVersion) return;
+        if (v == recentVersion || reordering || pendingOrderSaves > 0) return;   // a move being saved goes first
         recentVersion = v;
         showRecent(Recent.orderKnown(shelf));
     }
@@ -4280,6 +4280,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (link != null && link.resolveActivity(activity.getPackageManager()) != null) {
             try {
                 activity.startActivity(link.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                Recent.note(activity, it.pkg);   // the shelf's "Last opened first" counts it too
                 return;
             } catch (ActivityNotFoundException | SecurityException e) {
                 AppLog.w("continue watching link: " + e.getMessage());
@@ -4321,6 +4322,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (launch == null) return false;
         try {
             activity.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            Recent.note(activity, it.pkg);
             return true;
         } catch (ActivityNotFoundException | SecurityException e) {
             AppLog.w("couldn't open " + it.pkg + ": " + e.getMessage());

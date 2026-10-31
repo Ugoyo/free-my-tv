@@ -14,12 +14,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * The apps last opened from Free My TV (the shelf, All Apps, the picks, the screensaver), newest first, for the shelf's
- * "Last opened first" order (Prefs.shelfRecent). Noted only while that's on, and deleted when it goes off. Apps opened
- * some other way (the TV's own buttons, another app) aren't seen: that would need an accessibility service, which only
- * some TVs run. No times: a TV whose clock starts wrong after a power cut can't misorder it. A small file (a package a
- * line), replaced whole on each save so a crash never leaves half of it, and read again when another process changed it
- * (on Android 11 to 12L the screensaver runs in the main process).
+ * The apps last opened from Free My TV (the shelf, All Apps, the picks, Continue Watching, the screensaver), newest
+ * first, for the shelf's "Last opened first" order (Prefs.shelfRecent). Noted only while that's on, and deleted when it
+ * goes off. Apps opened some other way (the TV's own buttons, another app) aren't seen: that would need an accessibility
+ * service, which only some TVs run. No times: a TV whose clock starts wrong after a power cut can't misorder it. A small
+ * file (a package a line), replaced whole on each save so a crash never leaves half of it, and read again when another
+ * process changed it (on Android 11 to 12L the screensaver runs in the main process).
  */
 final class Recent {
     private Recent() {}
