@@ -26,8 +26,8 @@ import java.util.concurrent.Executors;
  * Your own photos. A computer puts them in the app's external files folder (tools/photos.py: adb push to
  * Android/data/io.freemytv/files/photos, no permission needed) or, where adb can't reach it, through PhotoInbox; the
  * next time the home screen, the screensaver or the settings open, each one is imported once into the app's private
- * folder, turned upright (EXIF), fitted whole to the screensaver's size (never cropped) and re-encoded (which also
- * drops its GPS and other tags), and the original is deleted. While they are on (Home Settings > My Photos), the screensaver shows them
+ * folder, turned upright (EXIF), kept whole at the screensaver's size (never cropped: see decode) and re-encoded (which
+ * also drops its GPS and other tags), and the original is deleted. While they are on (Home Settings > My Photos), the screensaver shows them
  * instead of the picks' photos, in the order they came, and without picks (no TMDB key) one of them is the home
  * screen's background, a new one every hour.
  */
@@ -40,6 +40,19 @@ final class Photos {
     static final int MAX = 100;
     /** Smaller ones are icons and thumbnails, not photos. */
     private static final int MIN_SIDE = 640;
+    /**
+     * Filling the screen may cut this much of a photo's height or width at most: 3:2 (16%) and 4:3 (25%) fill, as
+     * do 21:9 (24%) and 2:1 (11%); a 1:1 (44%), a portrait (3:4: 58%) or a phone's panorama (3:1: 41%) is shown whole.
+     */
+    private static final float MAX_CUT = 0.30f;
+
+    /** Whether a w × h photo fills the screen (cropped, with the slow zoom) rather than shown whole on black. */
+    static boolean fills(int w, int h) {
+        if (w <= 0 || h <= 0) return true;
+        float photo = (float) w / h, screen = (float) W / H;
+        float cut = photo < screen ? 1 - photo / screen : 1 - screen / photo;
+        return cut <= MAX_CUT;
+    }
 
     private static File dir(Context c) {
         return new File(c.getFilesDir(), "photos");
@@ -327,12 +340,13 @@ final class Photos {
     }
 
     /**
-     * The whole photo upright (EXIF), never cropped: fitted inside w × h, so a portrait or a panorama keeps its shape (the
-     * screensaver puts it on black or white), and enlarged to fit too when it's smaller (a preview, a phone's 1080p
-     * screenshot), so it fills the screen one way; null if too small or unreadable. Decoded from a FileDescriptor (the
-     * path form copies all of the file into memory first) and straight at its final size: halved while it stays larger,
-     * then scaled by the decoder itself (inDensity / inTargetDensity): a 24 MP photo is decoded at 3000 × 2000 (24 MB)
-     * and scaled into the result (8 MB) in the same call. Only that is turned.
+     * The whole photo upright (EXIF), never cropped, so the look can change later without a new import: one that fills()
+     * is sized to cover w × h (the screensaver crops it to the screen, with the slow zoom), a portrait or a panorama is
+     * fitted inside w × h (shown whole, on black). A smaller photo is enlarged to that size too (a preview, a phone's
+     * screenshot). Null if too small or unreadable. Decoded from a FileDescriptor (the path form copies all of the file
+     * into memory first) and straight at its final size: halved while it stays larger, then scaled by the decoder itself
+     * (inDensity / inTargetDensity): a 24 MP photo is decoded at 3000 × 2000 (24 MB) and scaled into the result in the
+     * same call. Only that is turned.
      */
     private static Bitmap decode(File f, int w, int h) throws IOException {
         BitmapFactory.Options bounds = new BitmapFactory.Options();
@@ -344,8 +358,9 @@ final class Photos {
         boolean sideways = degrees == 90 || degrees == 270;
         // The size it ends at, upright, then the same in the file's stored orientation
         int uw = sideways ? bounds.outHeight : bounds.outWidth, uh = sideways ? bounds.outWidth : bounds.outHeight;
-        float fit = Math.min((float) w / uw, (float) h / uh);
-        int tw = Math.max(1, Math.round(uw * fit)), th = Math.max(1, Math.round(uh * fit));
+        float sx = (float) w / uw, sy = (float) h / uh;
+        float scale = fills(uw, uh) ? Math.max(sx, sy) : Math.min(sx, sy);
+        int tw = Math.max(1, Math.round(uw * scale)), th = Math.max(1, Math.round(uh * scale));
         int sw = sideways ? th : tw, sh = sideways ? tw : th;
         BitmapFactory.Options opts = new BitmapFactory.Options();
         opts.inSampleSize = 1;
