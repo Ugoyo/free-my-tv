@@ -256,15 +256,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private int shelfFirst;
     private final int shelfVisible;
 
-    // Moving apps on the shelf (as on Apple TV): hold OK on a tile, then ← → move it, OK drops it, Back cancels. The
+    // Moving shelf apps or top buttons: hold OK, then ← → move it, OK drops it, Back cancels. The
     // lifted tile wiggles; the others slide to their new places (each slot's x offset is a spring that returns to 0).
     private static final long HOLD_MS = 500, WIGGLE_MS = 300;
     private static final float LIFT_GROW = 0.08f, WIGGLE_DEG = 1.5f;
-    private boolean reordering, reorderAnim, okHeld, holdArmed;
+    private boolean reordering, reorderTop, reorderAnim, okHeld, holdArmed;
+    private int orderRevision, pendingOrderSaves;
     private int liftIndex = -1;
     private long reorderAt;
     private float wiggle;
     private Spring[] tileSlide = new Spring[0];
+    private final Spring[] topSlide = new Spring[HomeApps.MAX_TOP];
     private final Spring moveLift = new Spring(0.3f, 0.72f, 0);
     private List<HomeApps.Item> reorderOrigin;
     private final Runnable holdStart = () -> { if (this.okDown && this.holdArmed) hold(); };
@@ -290,6 +292,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // Bottom drawer
     private List<HomeApps.Item> drawerItems = new ArrayList<>();
     private int drawerInputs;          // how many leading items are inputs (the rest are shortcuts)
+    private int drawerHome;            // where the Home Assistant tiles start (the list's size without them)
     private Spring[] drawerFocus = new Spring[0];
     private RectF[] drawerRects = new RectF[0];
     private final RectF weatherCard = new RectF(), quotesCard = new RectF();
@@ -648,6 +651,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             topFocus[i] = new Spring(0.26f, 0.85f, 0);
             topRects[i] = new RectF();
         }
+        for (int i = 0; i < topSlide.length; i++) topSlide[i] = new Spring(0.32f, 0.86f, 0);
         for (int i = 0; i < Recs.MAX_CARDS; i++) {
             cardFocus[i] = new Spring(0.32f, 0.78f, 0);
             cardOpen[i] = new Spring(0.32f, 0.78f, i == 0 ? 1 : 0);
@@ -661,7 +665,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             heroLayer.invalidate();
             wake();
         });
-        setLightButtons(HomeApps.topButtons());
+        setLightButtons(HomeApps.topButtons(null));
         recs.setLight(true);
         checkNight(false);
         sheetLayer.setVisibility(INVISIBLE);
@@ -734,6 +738,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         closeMenu(true);
         Choreographer.getInstance().removeFrameCallback(this);
         handler.removeCallbacks(tick);
+        handler.removeCallbacks(homeTick);
         handler.removeCallbacks(reloadSoon);
         handler.removeCallbacks(bars);
         playing.stop();
@@ -785,6 +790,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** The round buttons at the top right (Settings > Top Buttons), with their names in the current language. */
     private void setLightButtons(List<HomeApps.Item> list) {
+        if (reorderTop) cancelReorder(true);
         lightButtons.clear();
         lightButtons.addAll(list);
         if (zone == Z_TOP && topIndex >= 3 + lightButtons.size()) {
@@ -983,10 +989,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
         settleWhileSliding();
         boolean tilesMoving = step(tileFocus, dt);
-        if (reorderAnim) tilesMoving |= stepReorder(dt, up);
+        boolean topReorderFrame = reorderTop && reorderAnim;
+        if (reorderAnim) {
+            boolean moving = stepReorder(dt, up);
+            if (!topReorderFrame) tilesMoving |= moving;
+        }
         boolean statusMoving = step(statusFocus, dt);
         boolean heroMoving = heroFocus.step(dt);
-        boolean topMoving = step(topFocus, dt), cardsMoving = step(cardFocus, dt) | step(cardOpen, dt) | cardScroll.step(dt)
+        boolean topMoving = step(topFocus, dt) | topReorderFrame, cardsMoving = step(cardFocus, dt) | step(cardOpen, dt) | cardScroll.step(dt)
                 | step(watchFocus, dt) | watchScroll.step(dt);
         boolean tintMoving = tintMix.step(dt);
         if (tintMoving) {
@@ -1815,7 +1825,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 top = i;
             }
         }
-        if (liftIndex >= 0 && liftIndex < shelf.size() && moveLift.value > 0.02f) top = liftIndex;
+        if (!reorderTop && liftIndex >= 0 && liftIndex < shelf.size() && moveLift.value > 0.02f) top = liftIndex;
         int last = Math.min(shelf.size(), shelfFirst + shelfVisible);
         // Scrolling, tiles slide in and out through the glass's sides (only those that show any part are drawn). Only
         // then: on a shelf that fits, the clip would cut the end tiles' shadows in a straight line.
@@ -1832,7 +1842,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 // Moving apps: the tile slides from where it was and the lifted one wiggles (only then: no extra work
                 // otherwise).
                 float dx = i < tileSlide.length ? tileSlide[i].value : 0;
-                float angle = i == liftIndex ? wiggle * moveLift.value : 0;
+                float angle = !reorderTop && i == liftIndex ? wiggle * moveLift.value : 0;
                 if (dx == 0 && angle == 0) {
                     drawShelfTile(c, i);
                     continue;
@@ -1866,7 +1876,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private void drawShelfTile(Canvas c, int i) {
         HomeApps.Item it = shelf.get(i);
         // Lifted to be moved: a little bigger than focused, with a deeper shadow.
-        float l = i == liftIndex ? Math.max(0, moveLift.value) : 0;
+        float l = !reorderTop && i == liftIndex ? Math.max(0, moveLift.value) : 0;
         float f = tileFocus[i].value, fc = Ui.clamp(f), s = 1 + FOCUS_GROW * f + LIFT_GROW * l;
         RectF base = tileRects[i];
         float bw = base.width(), bh = base.height(), r0 = TILE_RADIUS * k;
@@ -1997,6 +2007,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static List<HomeApps.Item> drawerList(Context c) {
         List<HomeApps.Item> list = HomeApps.allInputs(c);
         list.addAll(HomeApps.drawerShortcuts(c));
+        list.addAll(HomeAssistant.items(c));   // empty unless configured and on in Home Settings
         return list;
     }
 
@@ -2007,8 +2018,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         for (int i = 0; same && i < list.size(); i++) {
             same = list.get(i).key.equals(drawerItems.get(i).key) && list.get(i).connected == drawerItems.get(i).connected;
         }
+        int home = inputs;
+        while (home < list.size() && list.get(home).kind != HomeApps.HOME_ASSISTANT) home++;
         drawerItems = list;
         drawerInputs = inputs;
+        drawerHome = home;
         if (drawerFocus.length != list.size()) {
             drawerFocus = new Spring[list.size()];
             drawerRects = new RectF[list.size()];
@@ -2027,11 +2041,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         int n = drawerItems.size();
         float left = MARGIN * k, right = CONTENT_R * k;
         float gap = 18 * k, groupGap = 56 * k;
-        int groups = drawerInputs > 0 && drawerInputs < n ? 2 : 1;
+        int groups = Math.max(1, (drawerInputs > 0 ? 1 : 0) + (drawerHome > drawerInputs ? 1 : 0) + (n > drawerHome ? 1 : 0));
         float tw = Math.min(230 * k, (right - left - Math.max(0, n - groups) * gap - (groups - 1) * groupGap) / Math.max(1, n));
         float x = left, top = ROW_TOP * k;
         for (int i = 0; i < n; i++) {
-            if (i == drawerInputs && i > 0) x += groupGap - gap;
+            if ((i == drawerInputs || i == drawerHome) && i > 0) x += groupGap - gap;
             drawerRects[i].set(x, top, x + tw, top + ROW_H * k);
             snap(drawerRects[i]);
             x += tw + gap;
@@ -2063,6 +2077,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         drawerIndex = shelf.isEmpty() ? 0 : nearest(drawerRects, tileRects[shelfIndex].centerX());
         for (int i = 0; i < drawerFocus.length; i++) drawerFocus[i].snap(i == drawerIndex ? 1 : 0);
         drawerDirty = true;
+        readHome();
     }
 
     private void closeDrawer() {
@@ -2070,7 +2085,48 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         drawer.target = 0;
         zone = Z_SHELF;
         for (Spring f : drawerFocus) f.snap(0);   // the drawer goes away: its focus doesn't need to animate
+        handler.removeCallbacks(homeTick);
         if (!shelf.isEmpty() && drawerIndex < drawerRects.length) shelfIndex = nearest(tileRects, drawerRects[drawerIndex].centerX());
+    }
+
+    // MARK: - Home Assistant tiles
+
+    /** Reads the tiles' states now and every HomeAssistant.REFRESH_MS while the drawer is open. */
+    private final Runnable homeTick = this::readHome;
+
+    private void readHome() {
+        handler.removeCallbacks(homeTick);
+        if (!running || !drawerOpen || drawerHome >= drawerItems.size()) return;
+        HomeAssistant.refresh(getContext(), this::homeChanged);
+        handler.postDelayed(homeTick, HomeAssistant.REFRESH_MS);
+    }
+
+    /** A state or a name changed: the tiles are drawn again (and TalkBack reads the new state). */
+    private void homeChanged() {
+        // A cover shows once its class is read, and a garage door or a gate goes: then the tiles themselves change.
+        List<HomeApps.Item> tiles = HomeAssistant.itemsNow(getContext());
+        boolean same = tiles.size() == drawerItems.size() - drawerHome;
+        for (int i = 0; same && i < tiles.size(); i++) same = tiles.get(i).key.equals(drawerItems.get(drawerHome + i).key);
+        if (!same) {
+            List<HomeApps.Item> list = new ArrayList<>(drawerItems.subList(0, drawerHome));
+            list.addAll(tiles);
+            setDrawerItems(list);
+        }
+        for (int i = drawerHome; i < drawerItems.size(); i++) {
+            HomeApps.Item it = drawerItems.get(i);
+            if (it.control != null) it.label = it.control.name;
+        }
+        drawerDirty = true;
+        wake();
+    }
+
+    private void pressHome(HomeApps.Item it) {
+        if (it.control == null) return;
+        HomeAssistant.activate(getContext(), it.control, ok -> {
+            if (!ok) showToast(Ui.tr("Couldn't reach Home Assistant."));
+            homeChanged();
+        });
+        homeChanged();   // a light shows its new state at once
     }
 
     /** Color for the drawer's text and symbols: dark by day, white at night. */
@@ -2109,7 +2165,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         pricePaint.setColor(drawerInk(0.95f));
         float titleBase = ROW_TITLE * k;
         if (drawerInputs > 0) c.drawText(Ui.tr("Inputs"), drawerRects[0].left + 4 * k, titleBase, rowTitle);
-        if (drawerInputs < drawerItems.size()) c.drawText(Ui.tr("Shortcuts"), drawerRects[drawerInputs].left + 4 * k, titleBase, rowTitle);
+        if (drawerInputs < drawerHome) c.drawText(Ui.tr("Shortcuts"), drawerRects[drawerInputs].left + 4 * k, titleBase, rowTitle);
+        if (drawerHome < drawerItems.size()) c.drawText("Home Assistant", drawerRects[drawerHome].left + 4 * k, titleBase, rowTitle);
         int top = -1;
         for (int i = 0; i < drawerItems.size(); i++) if (drawerFocus[i].value > 0.02f && (top < 0 || drawerFocus[i].value > drawerFocus[top].value)) top = i;
         for (int i = 0; i < drawerItems.size(); i++) if (i != top) drawDrawerTile(c, i);
@@ -2138,7 +2195,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             fill.setColor(Ui.alpha(WHITE, f));
             c.drawRoundRect(cell, r, r, fill);
         }
-        boolean off = it.kind == HomeApps.INPUT && !it.connected;
+        boolean off = it.kind == HomeApps.INPUT && !it.connected
+                || it.kind == HomeApps.HOME_ASSISTANT && it.control != null && !it.control.on();
         int ink = blend(tone(off ? 0xFF8E8E93 : L_INK, off ? 0x6BFFFFFF : 0xF2FFFFFF), INK, f);
         Symbols.draw(getContext(), c, it.symbol, cx, cell.top + cell.height() * 0.4f, 34 * k * s, ink);
         drawerLabel.setColor(ink);
@@ -2586,6 +2644,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void reload() {
         final Context c = getContext().getApplicationContext();
+        final int orderAtLoad = orderRevision;
         // The shelf and All Apps (100 to 500 ms of package queries on a TV) only when they can have changed.
         long up = SystemClock.uptimeMillis();
         final boolean apps = appsStale || Prefs.version != appsVersion || Ui.generation != appsGeneration
@@ -2601,15 +2660,18 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             final List<HomeApps.Item> st = statusList(c);
             final List<HomeApps.Item> d = drawerList(c);
             final List<HomeApps.Item> o = apps ? HomeApps.others(c) : null;
-            final List<HomeApps.Item> top = apps ? HomeApps.topButtons() : null;   // they change with Prefs too
+            final List<HomeApps.Item> top = apps ? HomeApps.topButtons(c) : null;   // they change with Prefs too
             // Only read when it's shown: with the picks or the clock, Continue Watching costs nothing.
             final String mode = Prefs.topContent();
             final boolean allowed = WatchNext.allowed(c);
             final List<WatchNext.Item> w = mode.equals(Prefs.TOP_CONTINUE) ? WatchNext.load(c) : new ArrayList<>();
             handler.post(() -> {
-                if (top != null) setLightButtons(top);
+                // A provider/package refresh must not cancel a drag or undo a move that was just saved.
+                boolean keepOrder = reordering || pendingOrderSaves > 0 || orderAtLoad != orderRevision;
+                if (top != null && !keepOrder) setLightButtons(top);
                 setTopContent(mode, w, allowed);
-                if (s != null) setShelf(s);
+                if (s != null && !keepOrder) setShelf(s);
+                if (apps && keepOrder) appsStale = true;
                 setStatusItems(st);
                 setDrawerItems(d);
                 if (o != null && !sheetOpen) setOthers(o);
@@ -2990,10 +3052,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 return true;
             case KeyEvent.KEYCODE_SETTINGS:
             case KeyEvent.KEYCODE_NOTIFICATION:
-                // The remote's Settings button (TCL's sends NOTIFICATION) opens TV Settings, as Hisense's gear does by
-                // default; ours stay on the gear on screen. Hisense's gear is a Remote Buttons choice (RemoteKeys); where
-                // the system takes the key first, it never gets here.
-                if (RemoteKeys.HISENSE) return false;
+                // The remote's Settings button opens TV Settings; ours stay on the gear on screen. TCL's and Hisense's
+                // gear (NOTIFICATION) is a Remote Buttons choice (RemoteKeys, first): with Nothing, the key is left alone.
+                // Where the system takes the key first, it never gets here.
+                if (RemoteKeys.HISENSE || RemoteKeys.TCL) return false;
                 if (down && e.getRepeatCount() == 0) HomeApps.open(activity, HomeApps.tvSettings(), this, w / 2, h / 2, 1, 1);
                 return true;
             case KeyEvent.KEYCODE_BACK:
@@ -3231,6 +3293,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             openRecents();
             return;
         }
+        if (it.kind == HomeApps.HOME_ASSISTANT) {
+            pressHome(it);
+            return;
+        }
         if (it.kind == HomeApps.ALL_APPS) {
             openSheet();
             return;
@@ -3323,10 +3389,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         });
     }
 
-    // MARK: - Moving apps on the shelf
+    // MARK: - Moving shelf apps and top buttons
 
     private boolean canReorder() {
-        if (sheetOpen || zone != Z_SHELF || shelfIndex >= shelf.size() || shelf.size() < 2) return false;
+        if (sheetOpen || menuOpen) return false;
+        if (zone == Z_TOP) return topIndex >= 3 && topIndex < 3 + lightButtons.size() && lightButtons.size() > 1;
+        if (zone != Z_SHELF || shelfIndex >= shelf.size() || shelf.size() < 2) return false;
         HomeApps.Item it = shelf.get(shelfIndex);
         return it.kind == HomeApps.APP && it.pkg != null;
     }
@@ -3335,10 +3403,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         handler.removeCallbacks(holdStart);
         holdArmed = false;
         if (reordering || !canReorder()) return;
+        cancelReorder(true);   // settle an earlier drop before lifting another row
         wake();
+        reorderTop = zone == Z_TOP;
+        orderRevision++;
         reordering = reorderAnim = okHeld = true;
-        reorderOrigin = new ArrayList<>(shelf);
-        liftIndex = shelfIndex;
+        reorderOrigin = new ArrayList<>(reorderTop ? lightButtons : shelf);
+        liftIndex = reorderTop ? topIndex - 3 : shelfIndex;
         reorderAt = SystemClock.uptimeMillis();
         moveLift.target = 1;
         click.open();
@@ -3385,6 +3456,27 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** Swaps the lifted app with its neighbor; both slide from where they are to their new slots. */
     private void shiftReorder(int dx) {
+        if (reorderTop) {
+            int i = topIndex - 3, j = i + dx;
+            if (j < 0 || j >= lightButtons.size()) return;
+            java.util.Collections.swap(lightButtons, i, j);
+            Spring focus = topFocus[3 + i];
+            topFocus[3 + i] = topFocus[3 + j];
+            topFocus[3 + j] = focus;
+            Spring slide = topSlide[i];
+            topSlide[i] = topSlide[j];
+            topSlide[j] = slide;
+            float d = topRects[3 + i].left - topRects[3 + j].left;
+            topSlide[j].value += d;
+            topSlide[i].value -= d;
+            topIndex = 3 + j;
+            liftIndex = j;
+            reorderAnim = statusDirty = true;
+            wake();
+            retarget(false);
+            click.move();
+            return;
+        }
         int i = shelfIndex, j = i + dx;
         if (j < 0 || j >= shelf.size()) return;
         HomeApps.Item it = shelf.get(i);
@@ -3411,20 +3503,31 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         click.move();
     }
 
-    /** OK: drops the app where it is and saves the shelf's new order. */
+    /** OK: drops the item where it is and saves that row's new order. */
     private void dropReorder() {
         if (!reordering) return;
         reordering = false;
+        orderRevision++;
         moveLift.target = 0;
+        List<HomeApps.Item> items = reorderTop ? lightButtons : shelf;
         boolean changed = false;
-        for (int i = 0; i < shelf.size() && !changed; i++) changed = shelf.get(i) != reorderOrigin.get(i);
+        for (int i = 0; i < items.size() && !changed; i++) changed = items.get(i) != reorderOrigin.get(i);
         reorderOrigin = null;
         click.open();
         retarget(false);
-        if (!changed) return;
+        if (!changed) { if (appsStale && running) reloadSoon(); return; }
         final List<String> order = new ArrayList<>();
+        if (reorderTop) {
+            for (HomeApps.Item it : lightButtons) order.add(it.key);
+            // Unavailable buttons (for example a missing store) keep their saved slots.
+            List<String> saved = Prefs.topButtons();
+            Prefs.setTopButtons(VisibleOrder.replace(saved == null ? HomeApps.TOP_DEFAULT : saved, order));
+            if (appsStale && running) reloadSoon();
+            return;
+        }
         for (HomeApps.Item it : shelf) order.add(it.pkg);
         final Context c = getContext().getApplicationContext();
+        pendingOrderSaves++;
         LOADER.execute(() -> {
             // The saved list may hold more than the shelf shows (apps not installed, past the limit): the shown ones
             // take their new order in the same slots, the others stay where they were.
@@ -3438,7 +3541,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 for (String p : all) if (!order.contains(p)) out.add(p);
             }
             final List<String> save = out;
-            handler.post(() -> Prefs.setShelf(save));
+            handler.post(() -> {
+                Prefs.setShelf(save);
+                pendingOrderSaves--;
+                if (appsStale && running) reloadSoon();
+            });
         });
     }
 
@@ -3447,9 +3554,28 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (!reordering && !reorderAnim) return;
         if (reordering) {
             reordering = false;
+            orderRevision++;
             moveLift.target = 0;
-            int n = shelf.size();
-            if (reorderOrigin != null && reorderOrigin.size() == n) {
+            int n = reorderTop ? lightButtons.size() : shelf.size();
+            if (reorderTop && reorderOrigin != null && reorderOrigin.size() == n) {
+                HomeApps.Item lifted = lightButtons.get(topIndex - 3);
+                Spring[] focus = new Spring[n], slide = new Spring[n];
+                for (int a = 0; a < n; a++) {
+                    int b = lightButtons.indexOf(reorderOrigin.get(a));
+                    focus[a] = topFocus[3 + b];
+                    slide[a] = topSlide[b];
+                    slide[a].value += topRects[3 + b].left - topRects[3 + a].left;
+                }
+                lightButtons.clear();
+                lightButtons.addAll(reorderOrigin);
+                for (int a = 0; a < n; a++) {
+                    topFocus[3 + a] = focus[a];
+                    topSlide[a] = slide[a];
+                }
+                liftIndex = lightButtons.indexOf(lifted);
+                topIndex = liftIndex + 3;
+                statusDirty = true;
+            } else if (!reorderTop && reorderOrigin != null && reorderOrigin.size() == n) {
                 HomeApps.Item lifted = shelf.get(shelfIndex);
                 Spring[] focus = new Spring[n], slide = new Spring[n];
                 LinearGradient[] shaders = tileShaders.length == n ? new LinearGradient[n] : tileShaders;
@@ -3468,13 +3594,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             }
             reorderOrigin = null;
             retarget(snap);
+            if (appsStale && running) reloadSoon();
         }
         if (snap) {
             moveLift.snap(0);
             for (Spring s : tileSlide) s.snap(0);
+            for (Spring s : topSlide) s.snap(0);
             wiggle = 0;
             liftIndex = -1;
             reorderAnim = false;
+            reorderTop = false;
+            statusDirty = true;
             tilesDirty = true;
         } else {
             wake();
@@ -3483,7 +3613,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** One frame of the move: the slides, the lift and the wiggle. Returns true while any of them moves. */
     private boolean stepReorder(float dt, long up) {
-        boolean moving = step(tileSlide, dt) | moveLift.step(dt);
+        boolean moving = step(tileSlide, dt) | step(topSlide, dt) | moveLift.step(dt);
         if (reordering || moveLift.value > 0.001f) {
             wiggle = WIGGLE_DEG * (float) Math.sin((up - reorderAt) * (2 * Math.PI / WIGGLE_MS));
             moving = true;
@@ -3491,6 +3621,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             wiggle = 0;
         }
         reorderAnim = moving;
+        if (!moving) { reorderTop = false; liftIndex = -1; }
         return moving;
     }
 
@@ -3547,6 +3678,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 if (i >= others.size()) return "";
                 return label(others, i) + ", " + Ui.trf("{i} of {n}", "i", i + 1, "n", others.size());
             case Z_TOP:
+                if (reordering && reorderTop && i == topIndex) {
+                    return Ui.trf("Moving {app}, position {n} of {total}",
+                            "app", label(lightButtons, i - 3), "n", i - 2, "total", lightButtons.size());
+                }
                 if (i >= 3) return label(lightButtons, i - 3);
                 return Ui.trf("{name}, tab {i} of {n}", "name", tabs()[i], "i", i + 1, "n", 3);
             case Z_CARDS: return i < cards.size() ? pickText(cards.get(i)) : "";
@@ -3557,7 +3692,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 return it.title + (it.episode != null ? ", " + it.episode : "") + (left != null ? ", " + left : "")
                         + (it.app != null && !it.app.isEmpty() ? ". " + Ui.trf("App: {app}", "app", it.app) : "");
             case Z_SHELF:
-                if (reordering && i == shelfIndex) {
+                if (reordering && !reorderTop && i == shelfIndex) {
                     return Ui.trf("Moving {app}, position {n} of {total}",
                             "app", label(shelf, i), "n", i + 1, "total", shelf.size());
                 }
@@ -3642,6 +3777,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         int group = (id - 1) / 1000, i = (id - 1) % 1000;
         if (group == RECENT_CARDS) return recentsOpen() && recents.stoppable(i);   // TalkBack's long click closes it, as ▲ does
         if (group == GRID) return canToggleShelf(i);
+        if (group == Z_TOP) {
+            return !reordering && !menuOpen && !sheetOpen && lightButtons.size() > 1
+                    && i >= 3 && i < 3 + lightButtons.size();
+        }
         if (group == Z_SHELF) {   // TalkBack's long click lifts the app, as holding OK does
             return !reordering && !menuOpen && !sheetOpen && shelf.size() > 1 && i < shelf.size()
                     && shelf.get(i).kind == HomeApps.APP && shelf.get(i).pkg != null;
@@ -3757,7 +3896,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private static String label(List<HomeApps.Item> list, int i) {
-        return i >= 0 && i < list.size() && list.get(i).label != null ? list.get(i).label : "";
+        if (i < 0 || i >= list.size() || list.get(i).label == null) return "";
+        HomeApps.Item it = list.get(i);
+        if (it.kind == HomeApps.HOME_ASSISTANT && it.control != null && it.control.hasOnOff()) {
+            return Ui.trf("{name}, {state}", "name", it.label, "state", it.control.on() ? Ui.tr("On") : Ui.tr("Off"));
+        }
+        return it.label;
     }
 
     /** A recommendation: title, details and the app that plays it. */
@@ -4620,10 +4764,24 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private void drawLightButtons(Canvas c) {
         applyTone();
         drawStatusIcons(c);
-        for (int i = 0; i < lightButtons.size(); i++) {
+        for (int slot = 0; slot < lightButtons.size(); slot++) {
+            int i = slot;
+            // The lifted button passes over its neighbors while they exchange places.
+            if (reorderTop && liftIndex >= 0 && liftIndex < lightButtons.size()) {
+                if (slot == lightButtons.size() - 1) i = liftIndex;
+                else if (slot >= liftIndex) i = slot + 1;
+            }
             HomeApps.Item it = lightButtons.get(i);
             RectF r = topRects[3 + i];
-            float f = Ui.clamp(topFocus[3 + i].value), s = 1 + 0.1f * f, rad = r.width() / 2 * s;
+            float lift = reorderTop && i == liftIndex ? Math.max(0, moveLift.value) : 0;
+            float dx = topSlide[i].value;
+            boolean transform = dx != 0 || lift > 0.001f;
+            if (transform) {
+                c.save();
+                c.translate(dx, -6 * k * lift);
+                if (lift > 0.001f) c.rotate(wiggle * lift, r.centerX(), r.centerY());
+            }
+            float f = Ui.clamp(topFocus[3 + i].value), s = 1 + 0.1f * f + LIFT_GROW * lift, rad = r.width() / 2 * s;
             cell.set(r.centerX() - rad, r.centerY() - rad, r.centerX() + rad, r.centerY() + rad);
             tmp.set(cell);
             tmp.offset(0, (6 + 8 * f) * k);
@@ -4645,6 +4803,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 lTip.setAlpha(Math.round(255 * f));
                 c.drawText(label, x, r.bottom + (40 + 4 * f) * k, lTip);
             }
+            if (transform) c.restore();
         }
         if (sleepText.isEmpty()) return;
         float right = (lightButtons.isEmpty() ? CONTENT_R * k : topRects[3].left) - 28 * k, cy = L_BUTTON_CY * k;
